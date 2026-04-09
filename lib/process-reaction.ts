@@ -2,6 +2,9 @@ import {
   createJiraIssue,
   fetchMessage,
   getPermalink,
+  jiraAddIssuesToSprint,
+  jiraListActiveAndFutureSprints,
+  jiraSearchAssignableUsers,
   plainToJiraAdf,
   postThreadReply,
   slackApiForm,
@@ -206,6 +209,43 @@ export async function handleBlockActionOpenModal(
     "(메시지 텍스트가 없습니다. 블록·첨부만 있는 경우 수동으로 적어 주세요.)"
   ).slice(0, 3000);
 
+  const jiraHost = process.env.JIRA_HOST?.replace(/^https?:\/\//, "");
+  const jiraEmail = process.env.JIRA_EMAIL;
+  const jiraToken = process.env.JIRA_API_TOKEN;
+  const projectKey = process.env.JIRA_PROJECT_KEY;
+  const boardRaw = process.env.JIRA_BOARD_ID?.trim();
+
+  const noneSprint = {
+    text: { type: "plain_text" as const, text: "— 스프린트 미지정 —" },
+    value: "_none_",
+  };
+  let sprintOptions: { text: { type: "plain_text"; text: string }; value: string }[] =
+    [noneSprint];
+
+  if (boardRaw && jiraHost && jiraEmail && jiraToken && projectKey) {
+    const boardId = Number.parseInt(boardRaw, 10);
+    if (!Number.isNaN(boardId)) {
+      try {
+        const sprints = await jiraListActiveAndFutureSprints({
+          host: jiraHost,
+          email: jiraEmail,
+          apiToken: jiraToken,
+          boardId,
+        });
+        for (const s of sprints.slice(0, 90)) {
+          const prefix = s.state === "active" ? "[진행] " : "";
+          const label = `${prefix}${s.name}`.slice(0, 75);
+          sprintOptions.push({
+            text: { type: "plain_text", text: label },
+            value: String(s.id),
+          });
+        }
+      } catch (e) {
+        console.error("jiraListActiveAndFutureSprints:", e);
+      }
+    }
+  }
+
   const view = {
     type: "modal",
     callback_id: JIRA_MODAL_CALLBACK_ID,
@@ -239,6 +279,37 @@ export async function handleBlockActionOpenModal(
           multiline: true,
           initial_value: initialBody,
           max_length: 3000,
+        },
+      },
+      {
+        type: "input",
+        block_id: "assignee_block",
+        optional: true,
+        label: {
+          type: "plain_text",
+          text: "담당자 (Jira 이메일·이름, 비워두면 미배정)",
+        },
+        element: {
+          type: "plain_text_input",
+          action_id: "assignee_query",
+          placeholder: {
+            type: "plain_text",
+            text: "예: hong@company.com",
+          },
+          max_length: 200,
+        },
+      },
+      {
+        type: "input",
+        block_id: "sprint_block",
+        optional: true,
+        label: { type: "plain_text", text: "스프린트" },
+        element: {
+          type: "static_select",
+          action_id: "sprint_pick",
+          placeholder: { type: "plain_text", text: "스프린트 선택" },
+          options: sprintOptions,
+          initial_option: noneSprint,
         },
       },
     ],
@@ -277,6 +348,12 @@ export async function handleViewSubmissionJira(
     payload.view.state.values.summary_block?.summary?.value?.trim() ?? "";
   const description =
     payload.view.state.values.desc_block?.description?.value?.trim() ?? "";
+  const assigneeQuery =
+    payload.view.state.values.assignee_block?.assignee_query?.value?.trim() ??
+    "";
+  const sprintRaw =
+    payload.view.state.values.sprint_block?.sprint_pick?.selected_option
+      ?.value ?? "_none_";
 
   if (!summary) {
     return {
@@ -317,11 +394,71 @@ export async function handleViewSubmissionJira(
     };
   }
 
+  let assigneeAccountId: string | null = null;
+  if (assigneeQuery) {
+    try {
+      const candidates = await jiraSearchAssignableUsers({
+        host: jiraHost,
+        email: jiraEmail,
+        apiToken: jiraToken,
+        projectKey,
+        query: assigneeQuery,
+      });
+      const qLower = assigneeQuery.toLowerCase();
+      const exact =
+        candidates.find(
+          (u) => u.emailAddress?.toLowerCase() === qLower,
+        ) ?? candidates.find((u) => u.displayName?.toLowerCase() === qLower);
+      const pick = exact ?? candidates[0];
+      if (!pick) {
+        return {
+          responseBody: {
+            response_action: "errors",
+            errors: {
+              assignee_block:
+                "해당 프로젝트에 배정 가능한 사용자를 찾지 못했습니다.",
+            },
+          },
+        };
+      }
+      assigneeAccountId = pick.accountId;
+    } catch (e) {
+      const msgText = e instanceof Error ? e.message : String(e);
+      return {
+        responseBody: {
+          response_action: "errors",
+          errors: {
+            assignee_block:
+              msgText.length > 120
+                ? `${msgText.slice(0, 117)}…`
+                : msgText,
+          },
+        },
+      };
+    }
+  }
+
+  let sprintIdNum: number | null = null;
+  if (sprintRaw && sprintRaw !== "_none_") {
+    const n = Number.parseInt(sprintRaw, 10);
+    if (Number.isNaN(n)) {
+      return {
+        responseBody: {
+          response_action: "errors",
+          errors: {
+            sprint_block: "스프린트 선택이 올바르지 않습니다.",
+          },
+        },
+      };
+    }
+    sprintIdNum = n;
+  }
+
   let msg;
   try {
     msg = await fetchMessage(slackToken, meta.channel, meta.messageTs);
   } catch {
-    /* thread reply만 스킵 */
+    /* thread_ts 폴백용 */
   }
 
   const permalink = await getPermalink(
@@ -351,6 +488,7 @@ export async function handleViewSubmissionJira(
       issueType,
       summary,
       descriptionAdf: plainToJiraAdf(jiraDescriptionText),
+      assigneeAccountId,
     });
   } catch (e) {
     const msgText = e instanceof Error ? e.message : String(e);
@@ -365,18 +503,33 @@ export async function handleViewSubmissionJira(
     };
   }
 
+  let sprintWarning = "";
+  if (sprintIdNum !== null) {
+    try {
+      await jiraAddIssuesToSprint({
+        host: jiraHost,
+        email: jiraEmail,
+        apiToken: jiraToken,
+        sprintId: sprintIdNum,
+        issueKeys: [issue.key],
+      });
+    } catch (e) {
+      console.error("jiraAddIssuesToSprint:", e);
+      sprintWarning =
+        "\n(스프린트에 자동 반영되지 않았습니다. Jira 보드에서 스프린트를 확인해 주세요.)";
+    }
+  }
+
   const issueUrl =
     browseBase && issue.key ? `${browseBase}/${issue.key}` : issue.key;
 
-  if (msg) {
-    const threadRoot = msg.thread_ts ?? msg.ts;
-    await postThreadReply(
-      slackToken,
-      meta.channel,
-      threadRoot,
-      `Jira 티켓이 생성되었습니다: ${issueUrl}`,
-    );
-  }
+  const threadRoot = msg ? msg.thread_ts ?? msg.ts : meta.messageTs;
+  await postThreadReply(
+    slackToken,
+    meta.channel,
+    threadRoot,
+    `티켓 생성이 완료 되었습니다.\n${issueUrl}${sprintWarning}`,
+  );
 
   return { responseBody: { response_action: "clear" } };
 }

@@ -100,6 +100,82 @@ export async function postThreadReply(
   }
 }
 
+function jiraBasicHeader(email: string, apiToken: string) {
+  const auth = Buffer.from(`${email}:${apiToken}`).toString("base64");
+  return {
+    Authorization: `Basic ${auth}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  } as const;
+}
+
+export type JiraAssignableUser = {
+  accountId: string;
+  displayName?: string;
+  emailAddress?: string;
+};
+
+/** 프로젝트에 배정 가능한 사용자 검색(이메일·이름) */
+export async function jiraSearchAssignableUsers(args: {
+  host: string;
+  email: string;
+  apiToken: string;
+  projectKey: string;
+  query: string;
+}): Promise<JiraAssignableUser[]> {
+  const q = encodeURIComponent(args.query.trim());
+  const url = `https://${args.host}/rest/api/3/user/assignable/search?project=${encodeURIComponent(args.projectKey)}&query=${q}&maxResults=20`;
+  const res = await fetch(url, {
+    headers: {
+      ...jiraBasicHeader(args.email, args.apiToken),
+    },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Jira assignable/search ${res.status}: ${t}`);
+  }
+  return res.json() as Promise<JiraAssignableUser[]>;
+}
+
+export type JiraSprint = { id: number; name: string; state?: string };
+
+export async function jiraListActiveAndFutureSprints(args: {
+  host: string;
+  email: string;
+  apiToken: string;
+  boardId: number;
+}): Promise<JiraSprint[]> {
+  const url = `https://${args.host}/rest/agile/1.0/board/${args.boardId}/sprint?state=active,future&maxResults=50`;
+  const res = await fetch(url, {
+    headers: { ...jiraBasicHeader(args.email, args.apiToken) },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Jira agile/sprint ${res.status}: ${t}`);
+  }
+  const json = (await res.json()) as { values?: JiraSprint[] };
+  return json.values ?? [];
+}
+
+export async function jiraAddIssuesToSprint(args: {
+  host: string;
+  email: string;
+  apiToken: string;
+  sprintId: number;
+  issueKeys: string[];
+}): Promise<void> {
+  const url = `https://${args.host}/rest/agile/1.0/sprint/${args.sprintId}/issue`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: jiraBasicHeader(args.email, args.apiToken),
+    body: JSON.stringify({ issues: args.issueKeys }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Jira sprint/issue ${res.status}: ${t}`);
+  }
+}
+
 export async function createJiraIssue(args: {
   host: string;
   email: string;
@@ -108,25 +184,22 @@ export async function createJiraIssue(args: {
   issueType: string;
   summary: string;
   descriptionAdf: ReturnType<typeof plainToJiraAdf>;
+  assigneeAccountId?: string | null;
 }): Promise<{ key: string; self: string }> {
-  const auth = Buffer.from(`${args.email}:${args.apiToken}`).toString(
-    "base64",
-  );
+  const fields: Record<string, unknown> = {
+    project: { key: args.projectKey },
+    summary: args.summary.slice(0, 254),
+    description: args.descriptionAdf,
+    issuetype: { name: args.issueType },
+  };
+  if (args.assigneeAccountId) {
+    fields.assignee = { accountId: args.assigneeAccountId };
+  }
+
   const res = await fetch(`https://${args.host}/rest/api/3/issue`, {
     method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      fields: {
-        project: { key: args.projectKey },
-        summary: args.summary.slice(0, 254),
-        description: args.descriptionAdf,
-        issuetype: { name: args.issueType },
-      },
-    }),
+    headers: jiraBasicHeader(args.email, args.apiToken),
+    body: JSON.stringify({ fields }),
   });
   if (!res.ok) {
     const errText = await res.text();
