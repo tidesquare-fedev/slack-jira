@@ -42,6 +42,18 @@ export function stripSlackUserMentions(text: string): string {
     .trim();
 }
 
+/**
+ * 한 줄이 "멘션만"이면 체크 항목으로 넣지 않음.
+ * - `<@U…>`만 있던 줄은 strip 후 빈 문자열로 이미 걸러짐.
+ * - Slack UI 없이 적힌 `@rebecca` 같은 줄은 `<@…>`로 안 바뀌어도 할 일이 아님.
+ */
+function isMentionOnlyLine(line: string): boolean {
+  const s = line.trim();
+  if (!s) return true;
+  const tokens = s.split(/\s+/);
+  return tokens.every((t) => /^@[^\s@]+$/.test(t));
+}
+
 export type ParsedChecklistSlashInput = {
   /** 체크 항목 라벨 (멘션 토큰 제거) */
   lines: string[];
@@ -66,6 +78,7 @@ export function parseChecklistSlashInput(text: string): ParsedChecklistSlashInpu
     .map((l) => stripSlackUserMentions(l))
     .map((l) => l.trim())
     .filter(Boolean)
+    .filter((l) => !isMentionOnlyLine(l))
     .slice(0, MAX_ITEMS);
 
   return { lines, mentionUserIds };
