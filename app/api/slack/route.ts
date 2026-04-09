@@ -1,4 +1,5 @@
 import { waitUntil } from "@vercel/functions";
+import { shouldSkipDuplicateReactionInvite } from "@/lib/slack-event-dedupe";
 import { verifySlackRequest } from "@/lib/slack-verify";
 import { sendJiraFormInvite } from "@/lib/process-reaction";
 
@@ -76,6 +77,19 @@ export async function POST(request: Request) {
     ev.item.channel &&
     ev.item.ts
   ) {
+    if (
+      shouldSkipDuplicateReactionInvite({
+        eventId: cb.event_id,
+        teamId: cb.team_id,
+        channel: ev.item.channel,
+        messageTs: ev.item.ts,
+        userId: ev.user ?? "",
+        reaction: TARGET_REACTION,
+      })
+    ) {
+      return new Response("", { status: 200 });
+    }
+
     waitUntil(
       sendJiraFormInvite({
         channel: ev.item.channel,
