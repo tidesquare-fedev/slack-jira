@@ -18,7 +18,10 @@ const OPEN_JIRA_MODAL_ACTION = "open_jira_modal";
 const DECLINE_JIRA_INVITE_ACTION = "decline_jira_invite";
 const JIRA_MODAL_CALLBACK_ID = "jira_ticket_modal_submit";
 
-/** 반응 당사자에게만 보이는 안내 + 모달 열기 버튼 (reaction_added에서는 모달을 직접 열 수 없음) */
+/**
+ * 반응한 메시지가 속한 스레드에 안내 + 버튼을 올림.
+ * (최상위 글이면 그 글의 스레드로, 답글이면 부모 스레드로 동일)
+ */
 export async function sendJiraFormInvite(input: {
   channel: string;
   messageTs: string;
@@ -41,7 +44,7 @@ export async function sendJiraFormInvite(input: {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: "이 메시지로 *Jira 티켓*을 만들 수 있습니다.",
+        text: `<@${input.reactorUserId}>님, 이 메시지를 바탕으로 *Jira 티켓*을 만들까요?`,
       },
     },
     {
@@ -66,15 +69,39 @@ export async function sendJiraFormInvite(input: {
     },
   ];
 
-  const posted = await slackApiForm(slackToken, "chat.postEphemeral", {
+  const fallbackText = `<@${input.reactorUserId}>님, 이 메시지로 Jira 티켓을 만들 수 있습니다.`;
+
+  let threadTs: string;
+  try {
+    const target = await fetchMessage(
+      slackToken,
+      input.channel,
+      input.messageTs,
+    );
+    threadTs = target.thread_ts ?? target.ts;
+  } catch (e) {
+    console.error("sendJiraFormInvite: fetchMessage, fallback ephemeral", e);
+    const ephemeral = await slackApiForm(slackToken, "chat.postEphemeral", {
+      channel: input.channel,
+      user: input.reactorUserId,
+      text: fallbackText,
+      blocks: JSON.stringify(blocks),
+    });
+    if (!ephemeral.ok) {
+      console.error("chat.postEphemeral:", ephemeral.error);
+    }
+    return;
+  }
+
+  const posted = await slackApiForm(slackToken, "chat.postMessage", {
     channel: input.channel,
-    user: input.reactorUserId,
-    text: "이 메시지로 Jira 티켓을 만들 수 있습니다.",
+    thread_ts: threadTs,
+    text: fallbackText,
     blocks: JSON.stringify(blocks),
   });
 
   if (!posted.ok) {
-    console.error("chat.postEphemeral:", posted.error);
+    console.error("chat.postMessage (thread invite):", posted.error);
   }
 }
 
@@ -106,7 +133,7 @@ export async function handleDeclineJiraInvite(
   });
 
   if (!deleted.ok) {
-    console.error("chat.delete (ephemeral dismiss):", deleted.error);
+    console.error("chat.delete (invite message):", deleted.error);
     return { error: deleted.error ?? "chat.delete failed" };
   }
   return {};
