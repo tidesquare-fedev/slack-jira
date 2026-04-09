@@ -1,4 +1,9 @@
 import {
+  CHECKLIST_CHECKBOX_ACTION_ID,
+  handleChecklistCheckboxAction,
+  type ChecklistBlockActionPayload,
+} from "@/lib/checklist";
+import {
   createJiraIssue,
   fetchMessage,
   getPermalink,
@@ -168,10 +173,18 @@ export async function handleDeclineJiraInvite(
   return {};
 }
 
-/** block_actions: 모달 열기 또는 거절(안내 메시지 삭제) */
+/** block_actions: 체크리스트 토글 · 모달 열기 · 거절 */
 export async function handleBlockActions(
   payload: BlockActionPayload,
 ): Promise<{ error?: string }> {
+  if (
+    payload.actions?.some((a) => a.action_id === CHECKLIST_CHECKBOX_ACTION_ID)
+  ) {
+    return handleChecklistCheckboxAction(
+      payload as unknown as ChecklistBlockActionPayload,
+    );
+  }
+
   const actionId = payload.actions?.find(
     (a) =>
       a.action_id === DECLINE_JIRA_INVITE_ACTION ||
