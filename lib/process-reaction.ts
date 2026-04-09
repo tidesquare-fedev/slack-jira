@@ -6,6 +6,7 @@ import {
   jiraListActiveAndFutureSprints,
   jiraParseCreateIssueErrorForSlack,
   jiraResolveAssigneeAccountId,
+  normalizeJiraHost,
   plainToJiraAdf,
   postThreadReply,
   slackApiForm,
@@ -210,7 +211,7 @@ export async function handleBlockActionOpenModal(
     "(메시지 텍스트가 없습니다. 블록·첨부만 있는 경우 수동으로 적어 주세요.)"
   ).slice(0, 3000);
 
-  const jiraHost = process.env.JIRA_HOST?.replace(/^https?:\/\//, "");
+  const jiraHost = normalizeJiraHost(process.env.JIRA_HOST);
   const jiraEmail = process.env.JIRA_EMAIL;
   const jiraToken = process.env.JIRA_API_TOKEN;
   const projectKey = process.env.JIRA_PROJECT_KEY;
@@ -375,7 +376,7 @@ export async function handleViewSubmissionJira(
   }
 
   const slackToken = process.env.SLACK_BOT_TOKEN;
-  const jiraHost = process.env.JIRA_HOST?.replace(/^https?:\/\//, "");
+  const jiraHost = normalizeJiraHost(process.env.JIRA_HOST);
   const jiraEmail = process.env.JIRA_EMAIL;
   const jiraToken = process.env.JIRA_API_TOKEN;
   const projectKey = process.env.JIRA_PROJECT_KEY;

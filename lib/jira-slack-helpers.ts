@@ -19,6 +19,21 @@ export function plainToJiraAdf(text: string) {
   };
 }
 
+/**
+ * JIRA_HOST 정규화: `https://도메인/` 처럼 넣어도 `도메인`만 남김.
+ * 끝에 `/`가 남으면 `https://host//rest/...` 이중 슬래시가 되어 API가 실패할 수 있음.
+ */
+export function normalizeJiraHost(raw: string | undefined | null): string | undefined {
+  if (raw == null) return undefined;
+  let h = raw.trim();
+  if (!h) return undefined;
+  h = h.replace(/^https?:\/\//i, "");
+  const pathIdx = h.indexOf("/");
+  if (pathIdx !== -1) h = h.slice(0, pathIdx);
+  h = h.replace(/\/+$/, "");
+  return h || undefined;
+}
+
 export async function slackApiForm<T>(
   token: string,
   method: string,
