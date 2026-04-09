@@ -66,12 +66,16 @@ export async function slackApiJson<T>(
   return res.json() as Promise<T & { ok: boolean; error?: string }>;
 }
 
+/**
+ * 채널 단건 조회 후, 없으면 스레드 답글용으로 conversations.replies 시도.
+ * (스레드 안 메시지는 history에 안 나오는 경우가 많음)
+ */
 export async function fetchMessage(
   token: string,
   channel: string,
   ts: string,
 ): Promise<SlackMessage> {
-  const data = await slackApiForm<{
+  const history = await slackApiForm<{
     messages?: SlackMessage[];
   }>(token, "conversations.history", {
     channel,
@@ -80,10 +84,35 @@ export async function fetchMessage(
     inclusive: "true",
     limit: "1",
   });
-  if (!data.ok || !data.messages?.[0]) {
-    throw new Error(`conversations.history: ${data.error ?? "no message"}`);
+
+  if (history.ok && history.messages?.[0]) {
+    return history.messages[0];
   }
-  return data.messages[0];
+
+  const replies = await slackApiForm<{
+    messages?: SlackMessage[];
+  }>(token, "conversations.replies", {
+    channel,
+    ts,
+    inclusive: "true",
+    limit: "200",
+  });
+
+  if (!replies.ok || !replies.messages?.length) {
+    const hint = !history.ok
+      ? history.error
+      : !replies.ok
+        ? replies.error
+        : "no message";
+    throw new Error(`fetchMessage: ${hint ?? "no message"}`);
+  }
+
+  const exact = replies.messages.find((m) => m.ts === ts);
+  if (exact) return exact;
+
+  throw new Error(
+    `fetchMessage: ts ${ts} not found in replies (${replies.messages.length} messages)`,
+  );
 }
 
 export async function getPermalink(

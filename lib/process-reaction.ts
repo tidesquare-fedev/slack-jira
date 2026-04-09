@@ -194,7 +194,10 @@ export async function handleBlockActionOpenModal(
     msg = await fetchMessage(slackToken, channel, messageTs);
   } catch (e) {
     console.error("fetchMessage in modal:", e);
-    return { error: "메시지를 불러오지 못했습니다. 봇이 채널에 초대됐는지 확인하세요." };
+    return {
+      error:
+        "메시지를 불러오지 못했습니다. 봇이 채널·스레드에 접근 가능한지(channels:history) 확인하세요.",
+    };
   }
 
   const rawText = msg.text?.trim() ?? "";
