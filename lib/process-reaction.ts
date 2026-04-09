@@ -4,7 +4,8 @@ import {
   getPermalink,
   jiraAddIssuesToSprint,
   jiraListActiveAndFutureSprints,
-  jiraSearchAssignableUsers,
+  jiraParseCreateIssueErrorForSlack,
+  jiraResolveAssigneeAccountId,
   plainToJiraAdf,
   postThreadReply,
   slackApiForm,
@@ -287,14 +288,14 @@ export async function handleBlockActionOpenModal(
         optional: true,
         label: {
           type: "plain_text",
-          text: "담당자 (Jira 이메일·이름, 비워두면 미배정)",
+          text: "담당자 (이메일·표시 이름·accountId, 비우면 미배정)",
         },
         element: {
           type: "plain_text_input",
           action_id: "assignee_query",
           placeholder: {
             type: "plain_text",
-            text: "예: hong@company.com",
+            text: "예: hong@company.com 또는 Jira accountId",
           },
           max_length: 200,
         },
@@ -397,31 +398,25 @@ export async function handleViewSubmissionJira(
   let assigneeAccountId: string | null = null;
   if (assigneeQuery) {
     try {
-      const candidates = await jiraSearchAssignableUsers({
+      const resolved = await jiraResolveAssigneeAccountId({
         host: jiraHost,
         email: jiraEmail,
         apiToken: jiraToken,
         projectKey,
         query: assigneeQuery,
       });
-      const qLower = assigneeQuery.toLowerCase();
-      const exact =
-        candidates.find(
-          (u) => u.emailAddress?.toLowerCase() === qLower,
-        ) ?? candidates.find((u) => u.displayName?.toLowerCase() === qLower);
-      const pick = exact ?? candidates[0];
-      if (!pick) {
+      if (!resolved) {
         return {
           responseBody: {
             response_action: "errors",
             errors: {
               assignee_block:
-                "해당 프로젝트에 배정 가능한 사용자를 찾지 못했습니다.",
+                "담당자를 찾지 못했습니다. 이메일·이름(일부)·Jira accountId를 확인하세요.",
             },
           },
         };
       }
-      assigneeAccountId = pick.accountId;
+      assigneeAccountId = resolved.accountId;
     } catch (e) {
       const msgText = e instanceof Error ? e.message : String(e);
       return {
@@ -492,13 +487,15 @@ export async function handleViewSubmissionJira(
     });
   } catch (e) {
     const msgText = e instanceof Error ? e.message : String(e);
+    const mapped = jiraParseCreateIssueErrorForSlack(msgText);
+    const block = mapped?.block ?? "summary_block";
+    const text =
+      mapped?.text ??
+      (msgText.length > 140 ? `${msgText.slice(0, 137)}...` : msgText);
     return {
       responseBody: {
         response_action: "errors",
-        errors: {
-          summary_block:
-            msgText.length > 140 ? `${msgText.slice(0, 137)}...` : msgText,
-        },
+        errors: { [block]: text },
       },
     };
   }
