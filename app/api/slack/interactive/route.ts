@@ -1,8 +1,11 @@
-import { verifySlackRequest } from "@/lib/slack-verify";
+import { waitUntil } from "@vercel/functions";
 import {
   handleBlockActions,
-  handleViewSubmissionJira,
+  runViewSubmissionJiraAsync,
+  validateViewSubmissionQuick,
+  type ViewSubmissionPayload,
 } from "@/lib/process-reaction";
+import { verifySlackRequest } from "@/lib/slack-verify";
 
 export const runtime = "nodejs";
 
@@ -55,10 +58,20 @@ export async function POST(request: Request) {
   }
 
   if (type === "view_submission") {
-    const { responseBody } = await handleViewSubmissionJira(
-      payload as Parameters<typeof handleViewSubmissionJira>[0],
+    const p = payload as ViewSubmissionPayload;
+    const quick = validateViewSubmissionQuick(p);
+    if (quick) {
+      return new Response(JSON.stringify(quick.responseBody), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    waitUntil(
+      runViewSubmissionJiraAsync(p).catch((e) => {
+        console.error("runViewSubmissionJiraAsync:", e);
+      }),
     );
-    return new Response(JSON.stringify(responseBody), {
+    return new Response(JSON.stringify({ response_action: "clear" }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });

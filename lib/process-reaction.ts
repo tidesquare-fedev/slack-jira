@@ -186,7 +186,7 @@ export async function handleBlockActions(
   return {};
 }
 
-type ViewSubmissionPayload = {
+export type ViewSubmissionPayload = {
   type: "view_submission";
   user?: { id?: string };
   view: {
@@ -408,9 +408,13 @@ export async function handleBlockActionOpenModal(
   return {};
 }
 
-export async function handleViewSubmissionJira(
+/**
+ * Slack view_submission 은 ~3초 안에 응답해야 함.
+ * 여기서는 검증만 하고, null 이면 곧바로 clear 응답 + 백그라운드에서 Jira 처리.
+ */
+export function validateViewSubmissionQuick(
   payload: ViewSubmissionPayload,
-): Promise<{ responseBody: object }> {
+): { responseBody: object } | null {
   if (payload.view.callback_id !== JIRA_MODAL_CALLBACK_ID) {
     return { responseBody: { response_action: "clear" } };
   }
@@ -429,9 +433,6 @@ export async function handleViewSubmissionJira(
     payload.view.state.values.summary_block?.summary?.value?.trim() ?? "";
   const description =
     payload.view.state.values.desc_block?.description?.value?.trim() ?? "";
-  const assigneeQuery =
-    payload.view.state.values.assignee_block?.assignee_query?.value?.trim() ??
-    "";
   const sprintRaw =
     payload.view.state.values.sprint_block?.sprint_pick?.selected_option
       ?.value ?? "_none_";
@@ -449,7 +450,10 @@ export async function handleViewSubmissionJira(
     return {
       responseBody: {
         response_action: "errors",
-        errors: { desc_block: "본문을 입력해 주세요. (기본값은 Slack 메시지 원문입니다.)" },
+        errors: {
+          desc_block:
+            "본문을 입력해 주세요. (기본값은 Slack 메시지 원문입니다.)",
+        },
       },
     };
   }
@@ -459,10 +463,6 @@ export async function handleViewSubmissionJira(
   const jiraEmail = process.env.JIRA_EMAIL;
   const jiraToken = process.env.JIRA_API_TOKEN;
   const projectKey = process.env.JIRA_PROJECT_KEY;
-  const issueType = process.env.JIRA_ISSUE_TYPE || "Task";
-  const browseBase =
-    process.env.JIRA_BROWSE_URL ||
-    (jiraHost ? `https://${jiraHost}/browse` : "");
 
   if (!slackToken || !jiraHost || !jiraEmail || !jiraToken || !projectKey) {
     return {
@@ -475,45 +475,6 @@ export async function handleViewSubmissionJira(
     };
   }
 
-  let assigneeAccountId: string | null = null;
-  if (assigneeQuery) {
-    try {
-      const resolved = await jiraResolveAssigneeAccountId({
-        host: jiraHost,
-        email: jiraEmail,
-        apiToken: jiraToken,
-        projectKey,
-        query: assigneeQuery,
-      });
-      if (!resolved) {
-        return {
-          responseBody: {
-            response_action: "errors",
-            errors: {
-              assignee_block:
-                "담당자를 찾지 못했습니다. 이메일·이름(일부)·Jira accountId를 확인하세요.",
-            },
-          },
-        };
-      }
-      assigneeAccountId = resolved.accountId;
-    } catch (e) {
-      const msgText = e instanceof Error ? e.message : String(e);
-      return {
-        responseBody: {
-          response_action: "errors",
-          errors: {
-            assignee_block:
-              msgText.length > 120
-                ? `${msgText.slice(0, 117)}…`
-                : msgText,
-          },
-        },
-      };
-    }
-  }
-
-  let sprintIdNum: number | null = null;
   if (sprintRaw && sprintRaw !== "_none_") {
     const n = Number.parseInt(sprintRaw, 10);
     if (Number.isNaN(n)) {
@@ -526,14 +487,121 @@ export async function handleViewSubmissionJira(
         },
       };
     }
-    sprintIdNum = n;
+  }
+
+  return null;
+}
+
+async function notifyJiraSubmitFailure(
+  slackToken: string,
+  meta: NonNullable<ReturnType<typeof parseMeta>>,
+  submitterSlackUserId: string,
+  detail: string,
+): Promise<void> {
+  const text = `⚠️ Jira 티켓 생성에 실패했습니다. ${detail}`;
+  try {
+    const m = await fetchMessage(slackToken, meta.channel, meta.messageTs);
+    const threadRoot = m.thread_ts ?? m.ts;
+    await postThreadReply(slackToken, meta.channel, threadRoot, text);
+  } catch {
+    if (submitterSlackUserId) {
+      const ep = await slackApiForm(slackToken, "chat.postEphemeral", {
+        channel: meta.channel,
+        user: submitterSlackUserId,
+        text,
+      });
+      if (!ep.ok) {
+        console.error("notifyJiraSubmitFailure ephemeral:", ep.error);
+      }
+    } else {
+      console.error("notifyJiraSubmitFailure:", detail);
+    }
+  }
+}
+
+export async function runViewSubmissionJiraAsync(
+  payload: ViewSubmissionPayload,
+): Promise<void> {
+  const meta = parseMeta(payload.view.private_metadata);
+  if (!meta) return;
+
+  const summary =
+    payload.view.state.values.summary_block?.summary?.value?.trim() ?? "";
+  const description =
+    payload.view.state.values.desc_block?.description?.value?.trim() ?? "";
+  const assigneeQuery =
+    payload.view.state.values.assignee_block?.assignee_query?.value?.trim() ??
+    "";
+  const sprintRaw =
+    payload.view.state.values.sprint_block?.sprint_pick?.selected_option
+      ?.value ?? "_none_";
+  const submitterId = payload.user?.id ?? "";
+
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const jiraHost = normalizeJiraHost(process.env.JIRA_HOST);
+  const jiraEmail = process.env.JIRA_EMAIL;
+  const jiraToken = process.env.JIRA_API_TOKEN;
+  const projectKey = process.env.JIRA_PROJECT_KEY;
+
+  if (
+    !slackToken ||
+    !jiraHost ||
+    !jiraEmail ||
+    !jiraToken ||
+    !projectKey ||
+    !summary ||
+    !description
+  ) {
+    return;
+  }
+
+  const issueType = process.env.JIRA_ISSUE_TYPE || "Task";
+  const browseBase =
+    process.env.JIRA_BROWSE_URL ||
+    (jiraHost ? `https://${jiraHost}/browse` : "");
+
+  let assigneeAccountId: string | null = null;
+  if (assigneeQuery) {
+    try {
+      const resolved = await jiraResolveAssigneeAccountId({
+        host: jiraHost,
+        email: jiraEmail,
+        apiToken: jiraToken,
+        projectKey,
+        query: assigneeQuery,
+      });
+      if (!resolved) {
+        await notifyJiraSubmitFailure(
+          slackToken,
+          meta,
+          submitterId,
+          "담당자를 찾지 못했습니다. 이메일·이름 또는 Jira accountId를 확인하세요.",
+        );
+        return;
+      }
+      assigneeAccountId = resolved.accountId;
+    } catch (e) {
+      const msgText = e instanceof Error ? e.message : String(e);
+      await notifyJiraSubmitFailure(
+        slackToken,
+        meta,
+        submitterId,
+        msgText.length > 400 ? `${msgText.slice(0, 397)}…` : msgText,
+      );
+      return;
+    }
+  }
+
+  let sprintIdNum: number | null = null;
+  if (sprintRaw && sprintRaw !== "_none_") {
+    sprintIdNum = Number.parseInt(sprintRaw, 10);
   }
 
   let msg;
   try {
     msg = await fetchMessage(slackToken, meta.channel, meta.messageTs);
   } catch {
-    /* thread_ts 폴백용 */
+    /* thread_ts 폴백 */
   }
 
   const permalink = await getPermalink(
@@ -568,20 +636,15 @@ export async function handleViewSubmissionJira(
   } catch (e) {
     const msgText = e instanceof Error ? e.message : String(e);
     const mapped = jiraParseCreateIssueErrorForSlack(msgText);
-    const block = mapped?.block ?? "summary_block";
     const text =
       mapped?.text ??
-      (msgText.length > 140 ? `${msgText.slice(0, 137)}...` : msgText);
-    return {
-      responseBody: {
-        response_action: "errors",
-        errors: { [block]: text },
-      },
-    };
+      (msgText.length > 200 ? `${msgText.slice(0, 197)}…` : msgText);
+    await notifyJiraSubmitFailure(slackToken, meta, submitterId, text);
+    return;
   }
 
   let sprintWarning = "";
-  if (sprintIdNum !== null) {
+  if (sprintIdNum !== null && !Number.isNaN(sprintIdNum)) {
     try {
       await jiraAddIssuesToSprint({
         host: jiraHost,
@@ -590,8 +653,8 @@ export async function handleViewSubmissionJira(
         sprintId: sprintIdNum,
         issueKeys: [issue.key],
       });
-    } catch (e) {
-      console.error("jiraAddIssuesToSprint:", e);
+    } catch (err) {
+      console.error("jiraAddIssuesToSprint:", err);
       sprintWarning =
         "\n(스프린트에 자동 반영되지 않았습니다. Jira 보드에서 스프린트를 확인해 주세요.)";
     }
@@ -617,8 +680,6 @@ export async function handleViewSubmissionJira(
       console.error("chat.delete (티켓 만들기 안내):", removed.error);
     }
   }
-
-  return { responseBody: { response_action: "clear" } };
 }
 
 /** @deprecated — 자동 생성 대신 sendJiraFormInvite 사용 */
