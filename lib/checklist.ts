@@ -54,6 +54,88 @@ function isMentionOnlyLine(line: string): boolean {
   return tokens.every((t) => /^@[^\s@]+$/.test(t));
 }
 
+/**
+ * 멘션만 적은 줄에서 `@표시용핸들` 토큰만 뽑음 (할 일 줄은 제외).
+ * Slack이 `<@U…>`로 치환하지 않은 경우 알림용으로 users.lookupByUsername 시도할 때 사용.
+ */
+export function extractRawAtHandlesFromMentionOnlyLines(text: string): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!isMentionOnlyLine(trimmed)) continue;
+    for (const t of trimmed.split(/\s+/)) {
+      const h = t.startsWith("@") ? t.slice(1) : t;
+      if (!h || seen.has(h)) continue;
+      seen.add(h);
+      ordered.push(h);
+    }
+  }
+  return ordered;
+}
+
+function dedupeUserIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** @핸들 문자열을 workspace username으로 간주해 user id로 치환 (실패한 핸들은 별도 반환) */
+export async function resolveSlackAtHandlesToUserIds(
+  token: string,
+  handles: string[],
+): Promise<{ ids: string[]; unresolvedHandles: string[] }> {
+  const ids: string[] = [];
+  const unresolvedHandles: string[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of handles) {
+    const handle = raw.replace(/^@+/, "").trim();
+    if (!handle) continue;
+
+    const candidates = Array.from(
+      new Set([handle, handle.toLowerCase()]),
+    ).filter(Boolean);
+
+    let id: string | undefined;
+    for (const username of candidates) {
+      const r = await slackApiForm<{ user?: { id?: string } }>(
+        token,
+        "users.lookupByUsername",
+        { username },
+      );
+      if (r.ok && r.user?.id) {
+        id = r.user.id;
+        break;
+      }
+    }
+
+    if (id) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    } else {
+      unresolvedHandles.push(handle);
+    }
+  }
+
+  return { ids, unresolvedHandles };
+}
+
+/** `<@U…>`로 잡힌 ID + lookup으로 잡힌 ID 합치기 */
+export function mergeSlackNotifyUserIds(
+  fromTokens: string[],
+  fromResolvedHandles: string[],
+): string[] {
+  return dedupeUserIds([...fromTokens, ...fromResolvedHandles]);
+}
+
 export type ParsedChecklistSlashInput = {
   /** 체크 항목 라벨 (멘션 토큰 제거) */
   lines: string[];
@@ -94,6 +176,7 @@ export function buildChecklistSlashResponse(
   lines: string[],
   userId: string,
   mentionUserIds: string[] = [],
+  unresolvedAtHandles: string[] = [],
 ): Record<string, unknown> {
   const options = lines.map((line, i) => ({
     text: {
@@ -109,14 +192,19 @@ export function buildChecklistSlashResponse(
       elements: [
         {
           type: "mrkdwn",
-          text: `<@${userId}>님이 만든 체크리스트`,
+          text: `<@${userId}>님이 /check로 등록한 체크리스트`,
         },
       ],
     },
   ];
 
-  if (mentionUserIds.length > 0) {
-    const mentionText = mentionUserIds.map((id) => `<@${id}>`).join(" ");
+  const pingMrkdwnParts = mentionUserIds.map((id) => `<@${id}>`);
+  for (const h of unresolvedAtHandles) {
+    if (h) pingMrkdwnParts.push(`@${h}`);
+  }
+
+  if (pingMrkdwnParts.length > 0) {
+    const mentionText = pingMrkdwnParts.join(" ");
     blocks.push({
       type: "section",
       text: {
@@ -142,7 +230,7 @@ export function buildChecklistSlashResponse(
   );
 
   const mentionSummary =
-    mentionUserIds.length > 0 ? ` · 멘션 ${mentionUserIds.length}명` : "";
+    pingMrkdwnParts.length > 0 ? ` · 알림·태그 ${pingMrkdwnParts.length}건` : "";
 
   return {
     response_type: "in_channel",

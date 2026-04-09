@@ -1,6 +1,9 @@
 import {
   buildChecklistSlashResponse,
+  extractRawAtHandlesFromMentionOnlyLines,
+  mergeSlackNotifyUserIds,
   parseChecklistSlashInput,
+  resolveSlackAtHandlesToUserIds,
 } from "@/lib/checklist";
 import { verifySlackRequest } from "@/lib/slack-verify";
 
@@ -57,12 +60,33 @@ export async function POST(request: Request) {
     return jsonResponse({
       response_type: "ephemeral",
       text:
-        "체크할 항목을 입력해 주세요.\n• 한 줄에 하나씩, 줄바꿈(Enter)으로만 나눕니다. 문장 안 쉼표는 그대로 쓸 수 있습니다.\n• @로 사람을 멘션하면 메시지에 알림이 갑니다. (항목 줄 안에 넣어도 됩니다)\n• 예: \"@홍길동 할 일 검토\" 한 줄 또는 맨 위 줄에 멘션만 두고 그 아래에 항목\n• 최대 10개까지 표시됩니다.",
+        "체크할 항목을 입력해 주세요.\n• 한 줄에 하나씩, 줄바꿈(Enter)으로만 나눕니다. 문장 안 쉼표는 그대로 쓸 수 있습니다.\n• 맨 위 등 별도 줄에 @만 두면 알림 대상으로 잡습니다. (가능하면 @ 후 멤버를 선택해 주세요)\n• 예: 첫 줄 \"@홍길동\"만 → 다음 줄부터 할 일\n• 최대 10개까지 표시됩니다.",
     });
   }
 
+  const token = process.env.SLACK_BOT_TOKEN;
+  const atHandles = extractRawAtHandlesFromMentionOnlyLines(text);
+  let notifyUserIds = mentionUserIds;
+  let unresolvedAtHandles: string[] = [];
+
+  if (token && atHandles.length > 0) {
+    const { ids, unresolvedHandles } = await resolveSlackAtHandlesToUserIds(
+      token,
+      atHandles,
+    );
+    notifyUserIds = mergeSlackNotifyUserIds(mentionUserIds, ids);
+    unresolvedAtHandles = unresolvedHandles;
+  } else if (!token && atHandles.length > 0) {
+    unresolvedAtHandles = atHandles.map((h) => h.replace(/^@+/, ""));
+  }
+
   return jsonResponse(
-    buildChecklistSlashResponse(lines, userId, mentionUserIds),
+    buildChecklistSlashResponse(
+      lines,
+      userId,
+      notifyUserIds,
+      unresolvedAtHandles,
+    ),
   );
 }
 
