@@ -33,18 +33,82 @@ export async function sendJiraFormInvite(input: {
     return;
   }
 
-  const value = JSON.stringify({
+  const fallbackText = `<@${input.reactorUserId}>님, 이 메시지로 Jira 티켓을 만들 수 있습니다.`;
+
+  let threadTs: string;
+  try {
+    const target = await fetchMessage(
+      slackToken,
+      input.channel,
+      input.messageTs,
+    );
+    threadTs = target.thread_ts ?? target.ts;
+  } catch (e) {
+    console.error("sendJiraFormInvite: fetchMessage, fallback ephemeral", e);
+    const valueEphemeral = JSON.stringify({
+      c: input.channel,
+      t: input.messageTs,
+      u: input.reactorUserId,
+    });
+    const blocksEphemeral = buildInviteBlocks(
+      input.reactorUserId,
+      valueEphemeral,
+    );
+    const ephemeral = await slackApiForm(slackToken, "chat.postEphemeral", {
+      channel: input.channel,
+      user: input.reactorUserId,
+      text: fallbackText,
+      blocks: JSON.stringify(blocksEphemeral),
+    });
+    if (!ephemeral.ok) {
+      console.error("chat.postEphemeral:", ephemeral.error);
+    }
+    return;
+  }
+
+  const r1 = await slackApiForm<{ ts?: string }>(
+    slackToken,
+    "chat.postMessage",
+    {
+      channel: input.channel,
+      thread_ts: threadTs,
+      text: fallbackText,
+    },
+  );
+
+  if (!r1.ok || !r1.ts) {
+    console.error("chat.postMessage (thread invite, text only):", r1.error);
+    return;
+  }
+
+  const inviteTs = r1.ts;
+  const valueWithInvite = JSON.stringify({
     c: input.channel,
     t: input.messageTs,
     u: input.reactorUserId,
+    i: inviteTs,
+  });
+  const blocks = buildInviteBlocks(input.reactorUserId, valueWithInvite);
+
+  const updated = await slackApiForm(slackToken, "chat.update", {
+    channel: input.channel,
+    ts: inviteTs,
+    text: fallbackText,
+    blocks: JSON.stringify(blocks),
   });
 
-  const blocks = [
+  if (!updated.ok) {
+    console.error("chat.update (invite blocks):", updated.error);
+  }
+}
+
+function buildInviteBlocks(reactorUserId: string, buttonValue: string) {
+  return [
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `<@${input.reactorUserId}>님, 이 메시지를 바탕으로 *Jira 티켓*을 만들까요?`,
+        text: `<@${reactorUserId}>님, 이 메시지를 바탕으로 *Jira 티켓*을 만들까요?`,
       },
     },
     {
@@ -58,7 +122,7 @@ export async function sendJiraFormInvite(input: {
           },
           style: "primary",
           action_id: OPEN_JIRA_MODAL_ACTION,
-          value,
+          value: buttonValue,
         },
         {
           type: "button",
@@ -68,41 +132,6 @@ export async function sendJiraFormInvite(input: {
       ],
     },
   ];
-
-  const fallbackText = `<@${input.reactorUserId}>님, 이 메시지로 Jira 티켓을 만들 수 있습니다.`;
-
-  let threadTs: string;
-  try {
-    const target = await fetchMessage(
-      slackToken,
-      input.channel,
-      input.messageTs,
-    );
-    threadTs = target.thread_ts ?? target.ts;
-  } catch (e) {
-    console.error("sendJiraFormInvite: fetchMessage, fallback ephemeral", e);
-    const ephemeral = await slackApiForm(slackToken, "chat.postEphemeral", {
-      channel: input.channel,
-      user: input.reactorUserId,
-      text: fallbackText,
-      blocks: JSON.stringify(blocks),
-    });
-    if (!ephemeral.ok) {
-      console.error("chat.postEphemeral:", ephemeral.error);
-    }
-    return;
-  }
-
-  const posted = await slackApiForm(slackToken, "chat.postMessage", {
-    channel: input.channel,
-    thread_ts: threadTs,
-    text: fallbackText,
-    blocks: JSON.stringify(blocks),
-  });
-
-  if (!posted.ok) {
-    console.error("chat.postMessage (thread invite):", posted.error);
-  }
 }
 
 type BlockActionPayload = {
@@ -177,15 +206,23 @@ function parseMeta(raw: string): {
   channel: string;
   messageTs: string;
   reactorUserId: string;
+  /** 스레드에 올린 '티켓 만들기' 봇 메시지 ts — 성공 시 삭제 */
+  inviteMessageTs?: string;
 } | null {
   try {
     const v = JSON.parse(raw) as {
       c?: string;
       t?: string;
       u?: string;
+      i?: string;
     };
     if (v.c && v.t) {
-      return { channel: v.c, messageTs: v.t, reactorUserId: v.u ?? "" };
+      return {
+        channel: v.c,
+        messageTs: v.t,
+        reactorUserId: v.u ?? "",
+        inviteMessageTs: typeof v.i === "string" && v.i.length > 0 ? v.i : undefined,
+      };
     }
   } catch {
     /* ignore */
@@ -207,11 +244,18 @@ export async function handleBlockActionOpenModal(
   let channel: string;
   let messageTs: string;
   let reactorUserId: string;
+  let inviteMessageTs: string | undefined;
   try {
-    const j = JSON.parse(action.value) as { c: string; t: string; u?: string };
+    const j = JSON.parse(action.value) as {
+      c: string;
+      t: string;
+      u?: string;
+      i?: string;
+    };
     channel = j.c;
     messageTs = j.t;
     reactorUserId = j.u ?? "";
+    inviteMessageTs = j.i;
   } catch {
     return { error: "Bad button value" };
   }
@@ -229,7 +273,12 @@ export async function handleBlockActionOpenModal(
 
   const rawText = msg.text?.trim() ?? "";
   const permalink = await getPermalink(slackToken, channel, messageTs);
-  const meta = JSON.stringify({ c: channel, t: messageTs, u: reactorUserId });
+  const meta = JSON.stringify({
+    c: channel,
+    t: messageTs,
+    u: reactorUserId,
+    ...(inviteMessageTs ? { i: inviteMessageTs } : {}),
+  });
 
   const initialSummary = summaryFromMessage(
     rawText || permalink || "Slack",
@@ -558,6 +607,16 @@ export async function handleViewSubmissionJira(
     threadRoot,
     `티켓 생성이 완료 되었습니다.\n${issueUrl}${sprintWarning}`,
   );
+
+  if (meta.inviteMessageTs) {
+    const removed = await slackApiForm(slackToken, "chat.delete", {
+      channel: meta.channel,
+      ts: meta.inviteMessageTs,
+    });
+    if (!removed.ok) {
+      console.error("chat.delete (티켓 만들기 안내):", removed.error);
+    }
+  }
 
   return { responseBody: { response_action: "clear" } };
 }
