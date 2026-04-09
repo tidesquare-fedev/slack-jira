@@ -169,6 +169,25 @@ async function processReactionAdded(event: Record<string, unknown>) {
   }
 }
 
+/**
+ * 브라우저 주소창·일부 모니터가 GET으로 칠 때 Vercel이
+ * INVALID_REQUEST_METHOD(405)를 내는 경우가 있어, 안내 응답을 둡니다.
+ * Slack 이벤트는 항상 POST로 옵니다.
+ */
+export async function GET() {
+  return Response.json(
+    {
+      ok: true,
+      hint: "Slack Event Subscriptions는 POST만 사용합니다. 주소창으로 연 것이면 이 응답은 정상입니다.",
+    },
+    { status: 200 }
+  );
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 200 });
+}
+
 export async function POST(request: Request) {
   const rawBody = await request.text();
   const signingSecret = process.env.SLACK_SIGNING_SECRET ?? "";
