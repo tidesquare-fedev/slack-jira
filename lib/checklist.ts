@@ -209,7 +209,7 @@ export function buildChecklistSlashResponse(
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `함께 확인해 주세요: ${mentionText}`,
+        text: `확인 부탁드려요: ${mentionText}`,
       },
     });
   }
