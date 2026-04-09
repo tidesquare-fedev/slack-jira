@@ -1,6 +1,6 @@
 import {
   buildChecklistSlashResponse,
-  parseChecklistLines,
+  parseChecklistSlashInput,
 } from "@/lib/checklist";
 import { verifySlackRequest } from "@/lib/slack-verify";
 
@@ -52,16 +52,18 @@ export async function POST(request: Request) {
     });
   }
 
-  const lines = parseChecklistLines(text);
+  const { lines, mentionUserIds } = parseChecklistSlashInput(text);
   if (lines.length === 0) {
     return jsonResponse({
       response_type: "ephemeral",
       text:
-        "체크할 항목을 입력해 주세요.\n• 한 줄에 하나씩, 줄바꿈(Enter)으로만 나눕니다. 문장 안 쉼표는 그대로 쓸 수 있습니다.\n• 예: 첫 줄에 \"회의 안건 정리, 자료는 드라이브\" → Enter → 다음 줄에 다음 항목\n• 최대 10개까지 표시됩니다.",
+        "체크할 항목을 입력해 주세요.\n• 한 줄에 하나씩, 줄바꿈(Enter)으로만 나눕니다. 문장 안 쉼표는 그대로 쓸 수 있습니다.\n• @로 사람을 멘션하면 메시지에 알림이 갑니다. (항목 줄 안에 넣어도 됩니다)\n• 예: \"@홍길동 할 일 검토\" 한 줄 또는 맨 위 줄에 멘션만 두고 그 아래에 항목\n• 최대 10개까지 표시됩니다.",
     });
   }
 
-  return jsonResponse(buildChecklistSlashResponse(lines, userId));
+  return jsonResponse(
+    buildChecklistSlashResponse(lines, userId, mentionUserIds),
+  );
 }
 
 export async function GET() {
