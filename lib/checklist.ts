@@ -15,25 +15,16 @@ export type ChecklistBlockActionPayload = {
   }[];
 };
 
-/** `/check` 뒤 텍스트 → 항목 배열 (최대 10개) */
+/** `/check` 뒤 텍스트 → 항목 배열 (줄바꿈만 구분, 쉼표는 문장 안에 자유롭게 사용 가능) */
 export function parseChecklistLines(text: string): string[] {
   const raw = text.trim();
   if (!raw) return [];
 
-  const lines = raw
+  return raw
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter(Boolean);
-
-  if (lines.length === 1 && lines[0].includes(",")) {
-    return lines[0]
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, MAX_ITEMS);
-  }
-
-  return lines.slice(0, MAX_ITEMS);
+    .filter(Boolean)
+    .slice(0, MAX_ITEMS);
 }
 
 /** 슬래시 커맨드 즉시 응답 JSON (본문만 JSON.stringify 해서 반환) */
